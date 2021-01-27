@@ -19,6 +19,7 @@
 */
 #include <boost/program_options.hpp>
 #include <boost/optional.hpp>
+#include "boost/tuple/tuple.hpp"
 
 #include "version.h"
 #include "../../lib/rapidjson/document.h"
@@ -40,13 +41,16 @@ namespace po = boost::program_options;
 
 typedef std::chrono::milliseconds millisec;
 
-const optional<sol_rules> gen_rules(command_line_helper&);
-void solve_random_game(int, const sol_rules&, command_line_helper&);
-void solve_input_files(vector<string>, const sol_rules&, command_line_helper&);
-void solve_game(const sol_rules& rules, command_line_helper& clh, optional<int> seed, optional<const Document&> in_doc);
-pair<solver, solver::result> solve_game(const sol_rules& rules, uint64_t timeout, uint64_t cache_capacity,
+const optional<sol_rules> gen_rules(command_line_helper &);
+void solve_random_game(int, const sol_rules &, command_line_helper &);
+void solve_input_files(vector<string>, const sol_rules &, command_line_helper &);
+void solve_game(const sol_rules &rules, command_line_helper &clh, optional<int> seed, optional<const Document &> in_doc);
+pair<solver, solver::result> solve_game(const sol_rules &rules, uint64_t timeout, uint64_t cache_capacity,
                                         game_state::streamliner_options str_opts,
-                                        optional<int> seed, optional<const Document&> in_doc);
+                                        optional<int> seed, optional<const Document &> in_doc, bool iddfs);
+boost::tuple<solver, solver::result, bool> run_iddfs(uint64_t optimal_depth, const sol_rules &rules, uint64_t timeout, uint64_t cache_capacity,
+                                       game_state::streamliner_options str_opts,
+                                       optional<int> seed, optional<const Document &> in_doc);
 void print_version();
 
 // Decides what to do given supplied command-line options
@@ -62,10 +66,11 @@ int main(int argc, const char* argv[]) {
     if (clh.get_available_game_types()) {
         sol_preset_types::print_available_games();
         return EXIT_SUCCESS;
-    }
+    } 
 
     // If the user has asked for the version, prints it
-    if (clh.get_version()) {
+    if (clh.get_version())
+    {
         print_version();
         return EXIT_SUCCESS;
     }
@@ -92,7 +97,7 @@ int main(int argc, const char* argv[]) {
         solv_c.calculate_solvability_percentage(clh.get_timeout(), clh.get_solvability(), clh.get_cores(),
                                                 clh.get_streamliners(), clh.get_resume());
     }
-        // If a random deal seed has been supplied, solves it
+    // If a random deal seed has been supplied, solves it
     else if (clh.get_random_deal() != -1) {
         solve_random_game(clh.get_random_deal(), *rules, clh);
     }
@@ -108,7 +113,7 @@ int main(int argc, const char* argv[]) {
         // supplied seed
         assert(!input_files.empty());
         solve_input_files(input_files, *rules, clh);
-    }
+    } 
 
     return EXIT_SUCCESS;
 }
@@ -170,14 +175,14 @@ void solve_game(const sol_rules& rules, command_line_helper& clh, optional<int> 
         timeout = clh.get_timeout();
         str_opt = clh.get_streamliners_game_state();
     }
-    solve_sol solution = solve_game(rules, timeout, clh.get_cache_capacity(), str_opt, seed, in_doc);
+    solve_sol solution = solve_game(rules, timeout, clh.get_cache_capacity(), str_opt, seed, in_doc, clh.get_optimal_solution());
 
     bool run_again = smart && solution.second.sol_type != solver::result::type::SOLVED;
     cout.flush();
     if (run_again)
         if (!clh.get_classify()) cout << "Unsolvable using streamliner. Running again...\n";
     optional<solve_sol> streamliner_solution = run_again
-            ? solve_game(rules, clh.get_timeout(), clh.get_cache_capacity(), game_state::streamliner_options::NONE, seed, in_doc)
+            ? solve_game(rules, clh.get_timeout(), clh.get_cache_capacity(), game_state::streamliner_options::NONE, seed, in_doc, clh.get_optimal_solution())
             : optional<solve_sol>();
 
     if (clh.get_classify()) {
@@ -203,16 +208,81 @@ void solve_game(const sol_rules& rules, command_line_helper& clh, optional<int> 
         } else {
             cout << "Deal:\n" << s.first.init_state << "\n";
         }
-        cout << s.second;
+        cout << "\n"<<s.second;
     }
     cout.flush();
 }
 
 pair<solver, solver::result> solve_game(const sol_rules& rules, uint64_t timeout, uint64_t cache_capacity,
                                         game_state::streamliner_options str_opts,
-                                        optional<int> seed, optional<const Document&> in_doc) {
+                                        optional<int> seed, optional<const Document&> in_doc,
+                                        bool iddfs) {
+    // DFS (non-optimal solution, used as an starting maximal depth for the)
+    cout << "DFS:\n";
     game_state gs = seed ? game_state(rules, *seed, str_opts) : game_state(rules, *in_doc, str_opts);
     solver sol(gs, cache_capacity);
     solver::result res = sol.run(std::chrono::milliseconds(timeout));
+    cout << res;
+    std::flush(cout);
+    if (res.sol_type != solver::result::type::SOLVED || !iddfs) {
+        // if no DFS solution or iddfs arg is false, dont go into idDFS
+        return make_pair(sol, res);
+    }
+        
+    // idDFS (starts at the DFS solution-1 and decreses the depth until the first unsolvable)
+    cout << "ID-DFS:\n";
+    boost::tuple<solver, solver::result, bool> iddfs_solver_result_flag = run_iddfs(res.depth, rules, timeout, cache_capacity, str_opts, seed, in_doc);
+    if (get<2>(iddfs_solver_result_flag)) {
+        return make_pair(get<0>(iddfs_solver_result_flag), get<1>(iddfs_solver_result_flag));
+    }
+    cout << "ID-DFS did not find a solution\n";
     return make_pair(sol, res);
+}
+
+
+boost::tuple<solver, solver::result, bool> run_iddfs(uint64_t optimal_depth, const sol_rules &rules, uint64_t timeout, uint64_t cache_capacity,
+                                       game_state::streamliner_options str_opts,
+                                       optional<int> seed, optional<const Document &> in_doc)
+{
+    game_state gs2 = seed ? game_state(rules, *seed, str_opts) : game_state(rules, *in_doc, str_opts);
+    solver sol_iddfs_optimal_depth(gs2, cache_capacity);
+    solver::result res_iddfs_optimal_depth;
+
+    bool iddfs_found_better_solution = false;
+    for (uint64_t depth = optimal_depth - 1; depth > 0; --depth)
+    {
+        if (depth >= optimal_depth)
+        {
+            // already found a solution at this depth.
+            cout << "ID-DFS - depth: " << depth << " skipped, previous solution is shorter\n";
+            continue;
+        }
+
+        cout << "ID-DFS - explore solution up to depth: " << depth;
+
+        game_state gs2 = seed ? game_state(rules, *seed, str_opts) : game_state(rules, *in_doc, str_opts);
+        solver current_solver(gs2, cache_capacity);
+        solver::result current_result = current_solver.run_DLS(depth, std::chrono::milliseconds(timeout));
+
+        cout << " -> at depth " << current_result.depth << " " << current_result.sol_type << "\n";
+
+        if (current_result.sol_type != solver::result::type::SOLVED)
+        { //type = {TIMEOUT, UNSOLVABLE, MEM_LIMIT, TERMINATED}
+            if (iddfs_found_better_solution) {
+                return boost::make_tuple(sol_iddfs_optimal_depth, res_iddfs_optimal_depth, true);
+            }
+            return boost::make_tuple(current_solver, current_result, false); //TODO: TODO: return tuple with a bool false that represent no solution was found.
+        }
+        else
+        {
+            iddfs_found_better_solution = true;
+            optimal_depth = current_result.depth; // update the depth limit.
+
+            // pointer to the solution. return that solution if depth-1 will not be solved.
+            solver sol_iddfs_optimal_depth = current_solver;
+            res_iddfs_optimal_depth = current_result;
+        }
+    }
+
+    return boost::make_tuple(sol_iddfs_optimal_depth, res_iddfs_optimal_depth, false); // returns tuple with a bool false that represent no solution was found.
 }

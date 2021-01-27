@@ -79,7 +79,8 @@ command_line_helper::command_line_helper()
                           "supplied solitaire game. Must supply "
                           "either 'random', 'benchmark', 'solvability' or list of deals to be "
                           "solved.")
-            ("deal-only", "outputs the starting deal for a given game type & random seed as json");
+            ("deal-only", "outputs the starting deal for a given game type & random seed as json")
+            ("iddfs", "if true, preform iterative-deeping-DFS, which returns an optimal solution (minimal depth)");
 
     po::options_description hidden_options("Hidden options");
     hidden_options.add_options()
@@ -121,6 +122,8 @@ bool command_line_helper::parse(int argc, const char* argv[]) {
     classify = (vm.count("classify") != 0);
 
     deal_only = (vm.count("deal-only") != 0);
+    
+    optimal_solution = (vm.count("iddfs") != 0); // if true, after the DFS solution, solve with id-DFS
 
     if (vm.count("input-files")) {
         input_files = vm["input-files"].as<vector<string>>();
@@ -294,6 +297,10 @@ const string command_line_helper::get_rules_file() {
 
 int command_line_helper::get_random_deal() {
     return random_deal;
+}
+
+bool command_line_helper::get_optimal_solution() {
+    return optimal_solution;
 }
 
 bool command_line_helper::get_classify() {
